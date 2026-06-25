@@ -1,0 +1,77 @@
+name: "Production Multi-Cloud Deployment Pipeline"
+
+on:
+  push:
+    branches: [ "main" ]
+  pull_request:
+    branches: [ "main" ]
+
+permissions:
+  contents: read
+
+jobs:
+  validate_and_test:
+    name: "1. Security & Linting"
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: 1.15.7
+
+      - name: Format Check
+        run: terraform fmt -check -recursive
+
+  provision_infrastructure:
+    name: "2. Compliance Guardrails & Deploy"
+    needs: validate_and_test
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: ./environments/production
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      # Setup Secure AWS Runner Access via Repository Secrets
+      - name: Configure AWS Credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: us-east-1
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
+
+      - name: Initialize Backend Connection
+        run: terraform init
+
+      - name: Generate Deployment Plan
+        run: |
+          terraform plan -out=tfplan
+          terraform show -json tfplan > tfplan.json
+
+      # --- RUN OPEN POLICY AGENT ENGINE SCAN ---
+      - name: Install Open Policy Agent (OPA)
+        run: |
+          curl -L -o opa https://openpolicyagent.org/downloads/v0.61.0/opa_linux_amd64_static
+          chmod +x opa
+          sudo mv opa /usr/local/bin/
+
+      - name: Evaluate Compliance Policies
+        run: |
+          opa eval --data ../../policies/compliance.rego --input tfplan.json "data.main.deny" > compliance_result.json
+          if grep -q "\[\"" compliance_result.json; then
+            echo "🚨 COMPLIANCE BLOCK: Infrastructure plan breaks compliance mandates."
+            cat compliance_result.json
+            exit 1
+          fi
+          echo "✅ Compliance check passed successfully."
+
+      - name: Execute Safe Infrastructure Apply
+        if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+        run: terraform apply -auto-approve tfplan
