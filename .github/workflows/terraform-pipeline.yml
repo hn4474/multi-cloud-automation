@@ -82,4 +82,7 @@ jobs:
 
       - name: Execute Safe Infrastructure Apply
         if: github.ref == 'refs/heads/main' && github.event_name == 'push'
-        run: terraform apply -auto-approve tfplan
+        run: terraform destroy -auto-approve 
+
+        # use the following command when you want to start again
+        # run: terraform apply -auto-approve tfplan
